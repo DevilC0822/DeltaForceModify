@@ -15,7 +15,7 @@ export default defineConfig(({ mode }) => {
       port: 6011,
     },
     preview: {
-      port: 6009,
+      port: 6011,
       host: '0.0.0.0',
       allowedHosts: ['df.mihouo.com'],
     },

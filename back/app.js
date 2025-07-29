@@ -10,9 +10,8 @@ const port = process.env.PORT || 6010;
 // CORS 配置
 const corsOptions = {
   origin: [
-    'http://localhost:5173',    // Vite 开发服务器
-    'http://localhost:6009',    // 其他可能的前端端口
-    'https://cook.mihouo.com', // 生产环境
+    'http://localhost:6011',    // Vite 开发服务器
+    'https://df.mihouo.com', // 生产环境
   ],
   credentials: true,
   optionsSuccessStatus: 200,
