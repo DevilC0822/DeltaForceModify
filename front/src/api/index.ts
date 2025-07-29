@@ -1,6 +1,6 @@
 import type { ApiResponse, ListResponse, SearchParams, WeaponModify } from '../types';
 
-const API_BASE_URL = 'http://localhost:6010/api/modify';
+const API_BASE_URL = `${__API_BASE_URL__}/modify`;
 
 class ApiError extends Error {
   public status: number;
