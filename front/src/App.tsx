@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import SearchBar from './components/SearchBar';
 import WeaponCard from './components/WeaponCard';
+import UploadButton from './components/UploadButton';
 import { apiService, ApiError } from './api';
 import type { WeaponModify, SearchParams } from './types';
 
@@ -76,6 +77,13 @@ function App() {
     }
   }, [loadWeapons, loadingMore, hasMore, searchParams]);
 
+  // 处理上传成功
+  const handleUploadSuccess = useCallback(() => {
+    // 重新加载第一页数据
+    setCurrentPage(1);
+    loadWeapons(searchParams);
+  }, [loadWeapons, searchParams]);
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
       {/* 顶部装饰 */}
@@ -83,13 +91,21 @@ function App() {
 
       <div className="relative">
         {/* 头部 */}
-        <header className="text-center py-12 px-4">
-          <div className="max-w-4xl mx-auto">
-            <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent mb-4">
-              三角洲行动
-            </h1>
-            <p className="text-xl text-gray-600 mb-2">武器改装配置</p>
-            <p className="text-sm text-gray-500">专业的武器配置方案，点击复制武器代码到游戏中使用</p>
+        <header className="py-8 px-4">
+          <div className="max-w-6xl mx-auto">
+            {/* 顶部工具栏 */}
+            <div className="flex justify-end mb-6">
+              <UploadButton onUploadSuccess={handleUploadSuccess} />
+            </div>
+
+            {/* 标题区域 */}
+            <div className="text-center">
+              <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent mb-4">
+                三角洲行动
+              </h1>
+              <p className="text-xl text-gray-600 mb-2">武器改装配置</p>
+              <p className="text-sm text-gray-500">专业的武器配置方案，点击复制武器代码到游戏中使用</p>
+            </div>
           </div>
         </header>
 
@@ -203,7 +219,7 @@ function App() {
         {/* 底部 */}
         <footer className="text-center py-8 px-4 border-t border-gray-100 bg-white/50 backdrop-blur-sm">
           <p className="text-gray-500 text-sm">
-            © 2024 Delta Force Modify. 数据来源于社区贡献，点击卡片中的复制按钮即可复制武器代码。
+            © 2025 Delta Force Modify. 数据来源于社区贡献，点击卡片中的复制按钮即可复制武器代码。
           </p>
         </footer>
       </div>

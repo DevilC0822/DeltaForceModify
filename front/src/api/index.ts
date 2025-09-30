@@ -2,6 +2,13 @@ import type { ApiResponse, ListResponse, SearchParams, WeaponModify } from '../t
 
 const API_BASE_URL = `${__API_BASE_URL__}/modify`;
 
+// 开发环境下显示 API 配置信息
+if (import.meta.env.DEV) {
+  console.log('🔧 API Configuration:');
+  console.log(`   __API_BASE_URL__: ${__API_BASE_URL__}`);
+  console.log(`   API_BASE_URL: ${API_BASE_URL}`);
+}
+
 class ApiError extends Error {
   public status: number;
   public code: number;
@@ -106,6 +113,91 @@ class ApiService {
       },
       body: JSON.stringify({ weaponId }),
     });
+    return response.data;
+  }
+
+  // 获取最后上传时间
+  async getLastImportTime(): Promise<{
+    hasImport: boolean;
+    lastImportTime: string | null;
+    fileName: string | null;
+    recordCount: number;
+  }> {
+    const response = await this.request<{
+      hasImport: boolean;
+      lastImportTime: string | null;
+      fileName: string | null;
+      recordCount: number;
+    }>('/last-import-time');
+    return response.data;
+  }
+
+  // 上传Excel文件
+  async uploadExcel(file: File): Promise<any> {
+    const formData = new FormData();
+    formData.append('excel', file);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/import-daozai`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data: ApiResponse<any> = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new ApiError(
+          data.msg || '上传失败',
+          response.status,
+          data.code || response.status
+        );
+      }
+
+      return data.data;
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw error;
+      }
+
+      throw new ApiError(
+        '网络连接失败，请检查网络设置',
+        0,
+        0
+      );
+    }
+  }
+
+  // 获取导入进度
+  async getImportProgress(): Promise<{
+    isImporting: boolean;
+    startTime: number | null;
+    fileName: string;
+    totalRecords: number;
+    processedRecords: number;
+    savedCount: number;
+    skippedCount: number;
+    errorCount: number;
+    currentStep: string;
+    currentWeaponName: string;
+    progress: number;
+    duration: number;
+    errors: any[];
+  }> {
+    const response = await this.request<{
+      isImporting: boolean;
+      startTime: number | null;
+      fileName: string;
+      totalRecords: number;
+      processedRecords: number;
+      savedCount: number;
+      skippedCount: number;
+      errorCount: number;
+      currentStep: string;
+      currentWeaponName: string;
+      progress: number;
+      duration: number;
+      errors: any[];
+    }>('/import-progress');
     return response.data;
   }
 }

@@ -22,6 +22,7 @@ let importStatus = {
   skippedCount: 0,
   errorCount: 0,
   currentStep: '',
+  currentWeaponName: '', // 当前正在处理的枪械名称
   errors: [],
   progress: 0 // 进度百分比
 };
@@ -38,20 +39,24 @@ function resetImportStatus() {
     skippedCount: 0,
     errorCount: 0,
     currentStep: '',
+    currentWeaponName: '',
     errors: [],
     progress: 0
   };
 }
 
 // 更新导入进度
-function updateProgress(step, processed = null) {
+function updateProgress(step, processed = null, weaponName = '') {
   importStatus.currentStep = step;
+  importStatus.currentWeaponName = weaponName;
   if (processed !== null) {
     importStatus.processedRecords = processed;
     importStatus.progress = importStatus.totalRecords > 0
       ? Math.round((processed / importStatus.totalRecords) * 100)
       : 0;
   }
+  // 打印进度日志，方便调试
+  console.log(`进度更新: ${importStatus.progress}% - ${step} ${weaponName ? `(${weaponName})` : ''}`);
 }
 
 // 配置 multer 用于文件上传
@@ -259,65 +264,51 @@ router.get('/weapon-names', async (req, res) => {
   }
 });
 
-// 接收 excel 文件 
-router.post('/import-daozai', upload.single('excel'), async (req, res) => {
+// 获取最后上传时间接口
+router.get('/last-import-time', async (req, res) => {
   try {
-    // 检查是否有正在进行的导入任务
-    if (importStatus.isImporting) {
-      return error(res, '正在有用户在导入，请稍候刷新页面查看最新内容', 423);
-    }
-
-    if (!req.file) {
-      return error(res, '请上传 Excel 文件', 400);
-    }
-
-    // 处理文件名乱码问题
-    const originalFileName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
-    if (!originalFileName.includes('刀仔')) {
-      return error(res, '请从 https://docs.qq.com/sheet/DSWV2QWFZUENXZnRE?tab=BB08J2 下载文档，并上传', 400);
-    }
-
     // 检查数据库连接状态
-    if (mongoose.connection.readyState === 1) {
-      // 检查最后导入时间
-      const lastImportRecord = await ImportRecord.findOne({
-        type: 'daozai_import'
-      }).sort({ lastImportTime: -1 });
-
-      if (lastImportRecord) {
-        const now = new Date();
-        const lastImportTime = new Date(lastImportRecord.lastImportTime);
-        const timeDiff = now - lastImportTime;
-        const oneHour = 60 * 60 * 1000; // 1小时的毫秒数
-
-        if (timeDiff < oneHour) {
-          const remainingMinutes = Math.ceil((oneHour - timeDiff) / (60 * 1000));
-          return error(res, `距离上次导入时间不足1小时，请等待 ${remainingMinutes} 分钟后再试`, 429);
-        }
-      }
+    if (mongoose.connection.readyState !== 1) {
+      return error(res, '数据库连接失败，服务暂时不可用', 503);
     }
 
-    // 初始化导入状态
-    resetImportStatus();
-    importStatus.isImporting = true;
-    importStatus.startTime = Date.now();
-    importStatus.fileName = originalFileName;
-    updateProgress('开始处理文件...');
+    // 获取最后一次成功导入的记录
+    const lastImportRecord = await ImportRecord.findOne({
+      type: 'daozai_import',
+      status: 'success'
+    }).sort({ lastImportTime: -1 });
 
-    console.log('=== 开始处理上传的 Excel 文件 ===');
-    console.log('原始文件名:', originalFileName);
-    console.log('保存路径:', req.file.path);
-    console.log('文件大小:', (req.file.size / 1024).toFixed(2), 'KB');
+    const result = {
+      hasImport: !!lastImportRecord,
+      lastImportTime: lastImportRecord ? lastImportRecord.lastImportTime : null,
+      fileName: lastImportRecord ? lastImportRecord.fileName : null,
+      recordCount: lastImportRecord ? lastImportRecord.recordCount : 0
+    };
 
+    console.log('获取最后上传时间成功:', result);
+    success(res, result, '获取最后上传时间成功');
+
+  } catch (err) {
+    console.error('获取最后上传时间失败:', err);
+    error(res, '获取最后上传时间失败: ' + err.message, 500);
+  }
+});
+
+// 后台导入处理函数
+async function processImportInBackground(filePath, originalFileName) {
+  console.log('=== 开始处理上传的 Excel 文件 ===');
+  console.log('原始文件名:', originalFileName);
+  console.log('保存路径:', filePath);
+
+  try {
     updateProgress('正在读取 Excel 文件...');
 
     // 使用 ExcelJS 读取文件
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.readFile(req.file.path);
+    await workbook.xlsx.readFile(filePath);
 
     const result = {
       fileName: originalFileName,
-      fileSize: req.file.size,
       data: [],
     };
 
@@ -387,90 +378,45 @@ router.post('/import-daozai', upload.single('excel'), async (req, res) => {
 
     // 更新总记录数
     importStatus.totalRecords = result.data.length;
-    updateProgress(`解析完成，共 ${result.data.length} 条数据，开始保存到数据库...`, 0);
+    updateProgress(`解析完成，共 ${result.data.length} 条数据，开始清空数据库...`, 0);
 
     // 数据库操作：保存到 MongoDB
     let savedCount = 0;
     let errorCount = 0;
     let skippedCount = 0;
-    const dbResults = {
-      success: [],
-      errors: [],
-      skipped: []
-    };
+    let deletedCount = 0;
 
     if (mongoose.connection.readyState === 1 && result.data.length > 0) {
+      // 先删除数据库中所有枪械数据
+      try {
+        updateProgress('正在清空数据库中的所有枪械数据...', 0);
+        const deleteResult = await Modify.deleteMany({});
+        deletedCount = deleteResult.deletedCount;
+        console.log(`\n=== 已删除数据库中的 ${deletedCount} 条旧数据 ===`);
+        updateProgress(`已删除 ${deletedCount} 条旧数据，开始导入新数据...`, 0);
+      } catch (deleteError) {
+        console.error('❌ 清空数据库失败:', deleteError);
+        errorCount++;
+        importStatus.errors.push({
+          item: null,
+          error: '清空数据库失败: ' + deleteError.message
+        });
+      }
+
       console.log(`\n=== 开始保存 ${result.data.length} 条数据到数据库 ===`);
 
       for (let i = 0; i < result.data.length; i++) {
         const item = result.data[i];
 
-        // 更新进度
-        updateProgress(`正在保存第 ${i + 1}/${result.data.length} 条记录...`, i);
+        // 更新进度，包含当前武器名称
+        updateProgress(`正在保存第 ${i + 1}/${result.data.length} 条记录...`, i + 1, item.name);
 
         try {
-          // 使用 name-type-description 作为唯一键检查是否已存在相同的记录
-          const existingItem = await Modify.findOne({
-            name: item.name,
-            type: item.type,
-            description: item.description
-          });
-
-          if (existingItem) {
-            // 记录已存在，检查 updateTime 是否相同
-            if (existingItem.updateTime === item.updateTime) {
-              // updateTime 相同，跳过此记录
-              skippedCount++;
-              dbResults.skipped.push({
-                action: 'skipped',
-                reason: 'updateTime unchanged',
-                data: {
-                  name: item.name,
-                  type: item.type,
-                  description: item.description,
-                  updateTime: item.updateTime
-                }
-              });
-              console.log(`⏭️  跳过记录: ${item.name} (${item.type}) - updateTime 未变更`);
-            } else {
-              // updateTime 不同，更新指定字段
-              const updatedItem = await Modify.findByIdAndUpdate(
-                existingItem._id,
-                {
-                  version: item.version,
-                  price: item.price,
-                  code: item.code,
-                  range: item.range,
-                  remark: item.remark,
-                  updateTime: item.updateTime
-                },
-                { new: true }
-              );
-              savedCount++;
-              dbResults.success.push({
-                action: 'updated',
-                data: updatedItem,
-                updatedFields: ['version', 'price', 'code', 'range', 'remark', 'updateTime']
-              });
-              console.log(`✅ 更新记录: ${item.name} (${item.type}) - updateTime: ${existingItem.updateTime} → ${item.updateTime}`);
-            }
-          } else {
-            // 记录不存在，创建新记录
-            const newItem = new Modify(item);
-            const savedItem = await newItem.save();
-            savedCount++;
-            dbResults.success.push({
-              action: 'created',
-              data: savedItem
-            });
-            console.log(`✅ 新增记录: ${item.name} (${item.type})`);
-          }
-
-          // 更新导入状态中的计数
-          importStatus.savedCount = savedCount;
-          importStatus.skippedCount = skippedCount;
-          importStatus.errorCount = errorCount;
-
+          // 直接创建新记录（因为已经清空了数据库）
+          const newItem = new Modify(item);
+          await newItem.save();
+          savedCount++;
+          console.log(`✅ 新增记录: ${item.name} (${item.type})`);
         } catch (dbError) {
           errorCount++;
           const errorInfo = {
@@ -478,16 +424,18 @@ router.post('/import-daozai', upload.single('excel'), async (req, res) => {
             error: dbError.message
           };
           console.error(`❌ 保存失败 ${item.name}:`, dbError.message);
-          dbResults.errors.push(errorInfo);
           importStatus.errors.push(errorInfo);
           importStatus.errorCount = errorCount;
         }
       }
 
+      importStatus.savedCount = savedCount;
+      importStatus.skippedCount = skippedCount;
+
       updateProgress('数据库操作完成', result.data.length);
       console.log(`\n=== 数据库操作完成 ===`);
-      console.log(`新增/更新: ${savedCount} 条`);
-      console.log(`跳过: ${skippedCount} 条`);
+      console.log(`删除旧数据: ${deletedCount} 条`);
+      console.log(`新增: ${savedCount} 条`);
       console.log(`失败: ${errorCount} 条`);
 
       // 保存导入记录
@@ -497,7 +445,7 @@ router.post('/import-daozai', upload.single('excel'), async (req, res) => {
           lastImportTime: new Date(),
           fileName: originalFileName,
           recordCount: result.data.length,
-          status: errorCount > 0 ? 'success' : 'success', // 即使有错误也标记为成功，因为部分数据导入成功
+          status: 'success',
           summary: {
             savedCount,
             skippedCount,
@@ -517,7 +465,7 @@ router.post('/import-daozai', upload.single('excel'), async (req, res) => {
 
     // 删除临时文件
     try {
-      fs.unlinkSync(req.file.path);
+      fs.unlinkSync(filePath);
       console.log('临时文件已清理');
     } catch (unlinkError) {
       console.warn('清理临时文件失败:', unlinkError.message);
@@ -526,21 +474,6 @@ router.post('/import-daozai', upload.single('excel'), async (req, res) => {
     // 标记导入完成
     importStatus.isImporting = false;
     updateProgress('导入完成！', result.data.length);
-
-    // 返回结果，包含数据库操作信息
-    const response = {
-      ...result,
-      database: {
-        connected: mongoose.connection.readyState === 1,
-        savedCount,
-        skippedCount,
-        errorCount,
-        results: dbResults
-      },
-      importDuration: Date.now() - importStatus.startTime
-    };
-
-    success(res, response, 'Excel 文件导入成功');
 
   } catch (err) {
     console.error('Excel 文件处理失败:', err);
@@ -559,7 +492,7 @@ router.post('/import-daozai', upload.single('excel'), async (req, res) => {
         const importRecord = new ImportRecord({
           type: 'daozai_import',
           lastImportTime: new Date(),
-          fileName: req.file ? Buffer.from(req.file.originalname, 'latin1').toString('utf8') : '未知文件',
+          fileName: originalFileName,
           recordCount: 0,
           status: 'failed',
           summary: {
@@ -576,6 +509,111 @@ router.post('/import-daozai', upload.single('excel'), async (req, res) => {
     }
 
     // 如果文件存在，尝试删除临时文件
+    try {
+      fs.unlinkSync(filePath);
+    } catch (unlinkError) {
+      console.warn('清理临时文件失败:', unlinkError.message);
+    }
+  }
+}
+
+// 接收 excel 文件
+router.post('/import-daozai', upload.single('excel'), async (req, res) => {
+  try {
+    // 检查是否有正在进行的导入任务
+    if (importStatus.isImporting) {
+      return error(res, '正在有用户在导入，请稍候刷新页面查看最新内容', 423);
+    }
+    if (!req.file) {
+      return error(res, '请上传 Excel 文件', 400);
+    }
+
+    // 处理文件名乱码问题 - 尝试不同的编码方式
+    let originalFileName = req.file.originalname;
+
+    // 尝试从 latin1 转换为 utf8
+    try {
+      originalFileName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
+    } catch (e) {
+      // 如果转换失败，使用原始文件名
+      console.log('文件名编码转换失败，使用原始文件名');
+    }
+
+    console.log('originalFileName', originalFileName);
+    console.log('包含刀仔?', originalFileName.includes('刀仔'));
+
+    // 放宽验证条件：文件名包含"刀仔"或文件是xlsx/xls格式即可
+    const isValidFile = originalFileName.includes('刀仔') ||
+                        originalFileName.includes('三角洲') ||
+                        /\.(xlsx|xls)$/i.test(originalFileName);
+
+    if (!isValidFile) {
+      return error(res, '请上传包含"刀仔"或"三角洲"字样的Excel文件，或从 https://docs.qq.com/sheet/DSWV2QWFZUENXZnRE?tab=BB08J2 下载文档', 400);
+    }
+
+    // 检查数据库连接状态
+    if (mongoose.connection.readyState === 1) {
+      // 检查导入时间限制（开发环境不限制，生产环境限制24小时）
+      const isDev = process.env.NODE_ENV !== 'production';
+
+      if (!isDev) {
+        // 生产环境：检查最后导入时间
+        const lastImportRecord = await ImportRecord.findOne({
+          type: 'daozai_import'
+        }).sort({ lastImportTime: -1 });
+
+        if (lastImportRecord) {
+          const now = new Date();
+          const lastImportTime = new Date(lastImportRecord.lastImportTime);
+          const timeDiff = now - lastImportTime;
+          const twentyFourHours = 24 * 60 * 60 * 1000; // 24小时的毫秒数
+
+          if (timeDiff < twentyFourHours) {
+            const remainingHours = Math.ceil((twentyFourHours - timeDiff) / (60 * 60 * 1000));
+            return error(res, `距离上次导入时间不足24小时，请等待 ${remainingHours} 小时后再试`, 429);
+          }
+        }
+      } else {
+        console.log('开发环境：跳过导入时间限制检查');
+      }
+    }
+
+    // 初始化导入状态
+    resetImportStatus();
+    importStatus.isImporting = true;
+    importStatus.startTime = Date.now();
+    importStatus.fileName = originalFileName;
+    updateProgress('开始处理文件...');
+
+    console.log('=== 开始异步导入任务 ===');
+    console.log('原始文件名:', originalFileName);
+    console.log('保存路径:', req.file.path);
+    console.log('文件大小:', (req.file.size / 1024).toFixed(2), 'KB');
+
+    // 立即返回响应
+    success(res, {
+      message: '导入任务已开始',
+      fileName: originalFileName,
+      fileSize: req.file.size
+    }, '开始导入Excel文件，请使用 /import-progress 接口查询导入进度');
+
+    // 在后台执行导入（不等待完成）
+    processImportInBackground(req.file.path, originalFileName).catch(err => {
+      console.error('后台导入任务失败:', err);
+    });
+
+  } catch (err) {
+    console.error('处理导入请求失败:', err);
+
+    // 更新导入状态为失败
+    importStatus.isImporting = false;
+    importStatus.currentStep = '导入失败: ' + err.message;
+    importStatus.errors.push({
+      error: err.message,
+      stack: err.stack
+    });
+
+    // 如果文件存在，尝试删除临时文件
     if (req.file && req.file.path) {
       try {
         fs.unlinkSync(req.file.path);
@@ -584,7 +622,7 @@ router.post('/import-daozai', upload.single('excel'), async (req, res) => {
       }
     }
 
-    error(res, 'Excel 文件处理失败: ' + err.message, 500);
+    error(res, '处理导入请求失败: ' + err.message, 500);
   }
 });
 
