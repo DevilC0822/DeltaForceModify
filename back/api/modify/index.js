@@ -78,8 +78,8 @@ const storage = multer.diskStorage({
   }
 });
 
-const fhddStartIndex = 3; // 烽火地带 开始行
-let qmzcStartIndex = -1; // 全面战场 开始行
+const fhddStartIndex = 7; // 烽火地带 开始行（表头在第7行）
+const qmzcStartIndex = 8; // 全面战场 开始行（表头在第8行）
 
 // 文件过滤器，只允许 Excel 文件
 const fileFilter = (req, file, callback) => {
@@ -321,6 +321,11 @@ async function processImportInBackground(filePath, originalFileName) {
 
       // 遍历所有行
       worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+        // 只处理第7行及以后的数据
+        if (rowNumber < fhddStartIndex) {
+          return;
+        }
+
         const rowData = [];
         let hasData = false;
 
@@ -352,26 +357,66 @@ async function processImportInBackground(filePath, originalFileName) {
         });
 
         if (hasData) {
-          if (rowData[0].includes('刀仔') || rowNumber === fhddStartIndex || rowNumber === qmzcStartIndex) {
+          // 跳过表头行
+          if (rowNumber === fhddStartIndex || rowNumber === qmzcStartIndex) {
             return;
           }
-          if ([... new Set(rowData.filter(item => Boolean(item)))].length === 1) {
-            qmzcStartIndex = rowNumber + 1;
-            return;
+
+          // 检查是否为烽火地带数据（前7列有数据）
+          const fhddData = rowData.slice(0, 7).filter(item => Boolean(item));
+
+          // 检查是否为全面战场数据（第9-11列有数据，注意数组索引从0开始，所以是8-10）
+          const qmzcData = rowData.slice(8, 11);
+          const qmzcNonEmptyData = qmzcData.filter(item => Boolean(item));
+
+          // 处理烽火地带数据（前7列）
+          if (fhddData.length > 0) {
+            result.data.push({
+              name: rowData[0] || '', // 枪械名称
+              version: rowData[1] || '', // 版本排行
+              price: rowData[2] || '', // 改装价格
+              description: rowData[3] || '', // 满改/半改/丐版
+              code: rowData[4] || '', // 枪械代码
+              range: rowData[5] || '', // 有效射程
+              remark: '', // 备注字段暂时为空
+              updateTime: rowData[6] || '', // 更新时间
+              source: '刀仔',
+              type: '烽火地带',
+              likeCount: 0,
+            });
           }
-          result.data.push({
-            name: rowData[rowData[4].includes('烽火地带') ? 0 : 2],
-            version: rowData[4].includes('烽火地带') ? rowData[1] : '',
-            price: rowData[4].includes('烽火地带') ? rowData[2] : '',
-            description: rowData[3],
-            code: rowData[4],
-            range: rowData[4].includes('烽火地带') ? rowData[5] : '',
-            remark: rowData[4].includes('烽火地带') ? rowData[6] : '',
-            updateTime: rowData[4].includes('烽火地带') ? rowData[7] : '',
-            source: '刀仔',
-            type: rowData[4].includes('烽火地带') ? '烽火地带' : '全面战场',
-            likeCount: 0,
-          });
+
+          // 处理全面战场数据（第9-11列）
+          if (qmzcNonEmptyData.length > 0) {
+            // 获取第9-11列的具体值
+            const name = (rowData[8] || '').toString().trim();
+            const version = (rowData[9] || '').toString().trim();
+            const code = (rowData[10] || '').toString().trim();
+
+            // 过滤无效数据：
+            // 1. 三列数据完全相同
+            // 2. 存在空值（空字符串或只包含空白字符）
+            const isAllSame = name === version && version === code && name !== '';
+            const hasEmpty = !name || !version || !code;
+
+            if (!isAllSame && !hasEmpty) {
+              result.data.push({
+                name: name, // 枪械名称
+                version: version, // 改装样式
+                price: '', // 全面战场没有价格字段
+                description: '', // 全面战场没有描述字段
+                code: code, // 改枪码
+                range: '', // 全面战场没有射程字段
+                remark: '', // 备注字段
+                updateTime: '', // 全面战场没有更新时间字段
+                source: '刀仔',
+                type: '全面战场',
+                likeCount: 0,
+              });
+            } else {
+              console.log(`跳过无效的全面战场数据: 名称="${name}", 样式="${version}", 代码="${code}" (原因: ${isAllSame ? '三列相同' : '存在空值'})`);
+            }
+          }
         }
       });
     });
@@ -544,8 +589,8 @@ router.post('/import-daozai', upload.single('excel'), async (req, res) => {
 
     // 放宽验证条件：文件名包含"刀仔"或文件是xlsx/xls格式即可
     const isValidFile = originalFileName.includes('刀仔') ||
-                        originalFileName.includes('三角洲') ||
-                        /\.(xlsx|xls)$/i.test(originalFileName);
+      originalFileName.includes('三角洲') ||
+      /\.(xlsx|xls)$/i.test(originalFileName);
 
     if (!isValidFile) {
       return error(res, '请上传包含"刀仔"或"三角洲"字样的Excel文件，或从 https://docs.qq.com/sheet/DSWV2QWFZUENXZnRE?tab=BB08J2 下载文档', 400);
